@@ -6,6 +6,11 @@ enum Shell {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
+        // GUI 앱은 .zprofile을 안 읽어서 Homebrew(npm 등)가 PATH에 없다 — 여기서 보충해준다.
+        var environment = ProcessInfo.processInfo.environment
+        let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["PATH"] = (["/opt/homebrew/bin", "/usr/local/bin"] + [existingPath]).joined(separator: ":")
+        process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe

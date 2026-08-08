@@ -115,6 +115,21 @@ enum CleanupScanner {
 
     // MARK: - 🟡 node_modules
 
+    // launchd/cron으로 하루 중 짧게만 돌아가는 무인 파이프라인 프로젝트는 스캔 시점에
+    // 거의 항상 "사용 중 아님"으로 보여서 verified 티어(기본 자동삭제)로 잘못 분류된다.
+    // 판단 기준은 프로젝트 이름을 하드코딩하지 않고, ~/Library/LaunchAgents에 그 경로를
+    // 참조하는 launchd job이 있는지로 동적으로 판별한다 — 이 저장소는 공개 GitHub repo라
+    // 개인 프로젝트 이름을 소스에 박아두면 안 됨.
+    private static func hasLaunchdJob(referencingPath projectPath: String) -> Bool {
+        let launchAgentsDir = "\(home)/Library/LaunchAgents"
+        guard let plists = try? FileManager.default.contentsOfDirectory(atPath: launchAgentsDir) else { return false }
+        for name in plists where name.hasSuffix(".plist") {
+            guard let contents = try? String(contentsOfFile: "\(launchAgentsDir)/\(name)", encoding: .utf8) else { continue }
+            if contents.contains(projectPath) { return true }
+        }
+        return false
+    }
+
     private static func scanNodeModules() -> [CleanupCategory] {
         let projectsRoot = "\(home)/MyWorkspace/projects"
         guard let projectDirs = try? FileManager.default.contentsOfDirectory(atPath: projectsRoot) else { return [] }
@@ -127,15 +142,18 @@ enum CleanupScanner {
                 let size = Shell.directorySizeBytes(nodeModulesPath)
                 guard size > 10_000_000 else { continue } // 10MB 미만은 노출 안 함
                 let projectDir = (nodeModulesPath as NSString).deletingLastPathComponent
-                let inUse = Shell.isPathInUse(projectDir)
+                let isUnattended = hasLaunchdJob(referencingPath: projectPath)
+                let inUse = isUnattended || Shell.isPathInUse(projectDir)
                 categories.append(CleanupCategory(
                     id: "node-modules-\(nodeModulesPath)",
                     name: "node_modules (\(projectName))",
                     tier: inUse ? .manual : .verified,
                     kind: .nodeModules,
-                    detail: inUse
-                        ? "실행 중인 프로세스가 감지되어 기본적으로 제외했습니다. npm install로 재생성됩니다"
-                        : "npm install로 재생성됩니다",
+                    detail: isUnattended
+                        ? "무인 파이프라인 프로젝트라 항상 수동 확인이 필요합니다. npm install로 재생성됩니다"
+                        : (inUse
+                            ? "실행 중인 프로세스가 감지되어 기본적으로 제외했습니다. npm install로 재생성됩니다"
+                            : "npm install로 재생성됩니다"),
                     sizeBytes: size,
                     targetPaths: [nodeModulesPath]
                 ))
