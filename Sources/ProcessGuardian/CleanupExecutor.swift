@@ -49,8 +49,27 @@ enum CleanupExecutor {
                           freedBytes: failed.isEmpty ? category.sizeBytes : 0,
                           succeededCount: succeeded, failed: failed, message: message)
 
-        case .coreSimulatorCache, .appCaches, .duplicateDownloads, .npxCache:
+        case .coreSimulatorCache, .appCaches, .duplicateDownloads, .npxCache,
+             .iosDeviceSupport, .androidSystemImages, .androidOldNDK, .claudeAppCache, .claudeVMBundles:
             return removePaths(category.targetPaths, name: category.name)
+
+        case .simulatorErase:
+            var succeeded = 0
+            var failed: [PathError] = []
+            for udid in category.targetPaths {
+                let (output, status) = Shell.run("/usr/bin/xcrun", ["simctl", "erase", udid])
+                if status == 0 {
+                    succeeded += 1
+                } else {
+                    failed.append(PathError(path: udid, error: output))
+                }
+            }
+            let message = failed.isEmpty
+                ? "\(succeeded)개 시뮬레이터 초기화 완료"
+                : "\(succeeded)개 성공, \(failed.count)개 실패"
+            return Result(categoryName: category.name,
+                          freedBytes: failed.isEmpty ? category.sizeBytes : 0,
+                          succeededCount: succeeded, failed: failed, message: message)
 
         case .nodeModules:
             var freed: Int64 = 0

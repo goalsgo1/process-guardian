@@ -9,10 +9,16 @@ enum CleanupScanner {
         categories.append(scanNpxCache())
         if let runtimes = scanUnusedSimulatorRuntimes() { categories.append(runtimes) }
         categories.append(scanCoreSimulatorCache())
+        categories.append(scanIOSDeviceSupport())
+        if let simData = scanSimulatorDevices() { categories.append(simData) }
+        if let androidImages = scanAndroidSystemImages() { categories.append(androidImages) }
+        if let androidNDK = scanAndroidOldNDK() { categories.append(androidNDK) }
         categories.append(contentsOf: scanNodeModules())
         let duplicateDownloads = scanDuplicateDownloads()
         categories.append(duplicateDownloads)
         categories.append(scanAppCaches())
+        categories.append(scanClaudeAppCache())
+        if let vmBundles = scanClaudeVMBundles() { categories.append(vmBundles) }
         categories.append(scanDownloadsReviewOnly(excluding: Set(duplicateDownloads.targetPaths)))
         return categories
     }
@@ -249,6 +255,182 @@ enum CleanupScanner {
             id: "app-caches", name: "앱 캐시 (VSCode/Chrome/Telegram/pip 등)", tier: .safe, kind: .appCaches,
             detail: "각 앱이 다시 만들어내는 임시 캐시입니다",
             sizeBytes: total, targetPaths: targets
+        )
+    }
+
+    // MARK: - 🟢 iOS DeviceSupport
+
+    private static func scanIOSDeviceSupport() -> CleanupCategory {
+        let basePath = "\(home)/Library/Developer/Xcode/iOS DeviceSupport"
+        var total: Int64 = 0
+        var targets: [String] = []
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: basePath) {
+            for entry in entries {
+                let full = "\(basePath)/\(entry)"
+                total += Shell.directorySizeBytes(full)
+                targets.append(full)
+            }
+        }
+        return CleanupCategory(
+            id: "ios-devicesupport", name: "iOS DeviceSupport", tier: .safe, kind: .iosDeviceSupport,
+            detail: "연결했던 기기의 디버그 심볼 캐시입니다. Xcode가 필요할 때 다시 받습니다",
+            sizeBytes: total, targetPaths: targets
+        )
+    }
+
+    // MARK: - 🔴 시뮬레이터 데이터 초기화 (이름·페어링 유지, 내용만 비움)
+
+    private static func scanSimulatorDevices() -> CleanupCategory? {
+        let (listOutput, status) = Shell.run("/usr/bin/xcrun", ["simctl", "list", "devices", "-j"])
+        guard status == 0, let data = listOutput.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let devicesByRuntime = root["devices"] as? [String: Any] else { return nil }
+
+        var udids: [String] = []
+        var names: [String] = []
+        var total: Int64 = 0
+        for (_, value) in devicesByRuntime {
+            guard let list = value as? [[String: Any]] else { continue }
+            for device in list {
+                guard let udid = device["udid"] as? String, let name = device["name"] as? String else { continue }
+                let path = "\(home)/Library/Developer/CoreSimulator/Devices/\(udid)"
+                let size = Shell.directorySizeBytes(path)
+                guard size > 100_000_000 else { continue } // 100MB 미만은 초기화할 의미 없음
+                udids.append(udid)
+                names.append(name)
+                total += size
+            }
+        }
+        guard !udids.isEmpty else { return nil }
+        return CleanupCategory(
+            id: "simulator-erase",
+            name: "시뮬레이터 데이터 초기화 (\(names.joined(separator: ", ")))",
+            tier: .manual, kind: .simulatorErase,
+            detail: "이름·페어링은 유지하고 설치된 앱·데이터만 비웁니다. 다음 테스트 때 앱을 다시 설치해야 합니다",
+            sizeBytes: total, targetPaths: udids
+        )
+    }
+
+    // MARK: - 🟡 Android 미사용 system-image
+
+    /// 생성된 AVD(config.ini의 image.sysdir.*)가 실제로 참조하는 system-image 태그(android-XX) 집합
+    private static func androidUsedSystemImageTags() -> Set<String> {
+        let avdRoot = "\(home)/.android/avd"
+        var used = Set<String>()
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: avdRoot) else { return used }
+        for entry in entries where entry.hasSuffix(".avd") {
+            let configPath = "\(avdRoot)/\(entry)/config.ini"
+            guard let content = try? String(contentsOfFile: configPath, encoding: .utf8) else { continue }
+            for rawLine in content.split(separator: "\n") {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                guard line.hasPrefix("image.sysdir"), let eqIdx = line.firstIndex(of: "=") else { continue }
+                let value = line[line.index(after: eqIdx)...]
+                guard let range = value.range(of: "system-images/") else { continue }
+                let rest = value[range.upperBound...]
+                if let slashIdx = rest.firstIndex(of: "/") {
+                    used.insert(String(rest[rest.startIndex..<slashIdx]))
+                }
+            }
+        }
+        return used
+    }
+
+    private static func scanAndroidSystemImages() -> CleanupCategory? {
+        let sdkPath = "\(home)/Library/Android/sdk/system-images"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: sdkPath), !entries.isEmpty else { return nil }
+
+        let used = androidUsedSystemImageTags()
+        var targets: [String] = []
+        var total: Int64 = 0
+        for entry in entries where !used.contains(entry) {
+            let full = "\(sdkPath)/\(entry)"
+            targets.append(full)
+            total += Shell.directorySizeBytes(full)
+        }
+        guard !targets.isEmpty else { return nil }
+        return CleanupCategory(
+            id: "android-system-images",
+            name: "Android system-images (\(targets.count)개, 생성된 에뮬레이터 미참조분)",
+            tier: .verified, kind: .androidSystemImages,
+            detail: "생성된 에뮬레이터(AVD)가 쓰지 않는 이미지입니다. 새 에뮬레이터 만들 때 다시 받습니다",
+            sizeBytes: total, targetPaths: targets
+        )
+    }
+
+    // MARK: - 🟡 Android 구버전 NDK
+
+    /// 현재 설치된 Flutter SDK가 기본으로 쓰는 NDK 버전. 확인 못 하면 nil(이 경우 카테고리 자체를 건너뜀 — 잘못 지우는 것 방지)
+    private static func flutterDefaultNdkVersion() -> String? {
+        let (whichOut, whichStatus) = Shell.run("/usr/bin/env", ["which", "flutter"])
+        guard whichStatus == 0 else { return nil }
+        let flutterBin = whichOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !flutterBin.isEmpty else { return nil }
+        let (resolvedOut, resolvedStatus) = Shell.run("/usr/bin/readlink", ["-f", flutterBin])
+        let realBin = resolvedStatus == 0 ? resolvedOut.trimmingCharacters(in: .whitespacesAndNewlines) : flutterBin
+        guard !realBin.isEmpty else { return nil }
+        let binDir = (realBin as NSString).deletingLastPathComponent
+        let flutterRoot = (binDir as NSString).deletingLastPathComponent
+        let extPath = "\(flutterRoot)/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt"
+        guard let content = try? String(contentsOfFile: extPath, encoding: .utf8) else { return nil }
+        guard let regex = try? NSRegularExpression(pattern: #"ndkVersion:\s*String\s*=\s*"([^"]+)""#) else { return nil }
+        let range = NSRange(content.startIndex..., in: content)
+        guard let match = regex.firstMatch(in: content, range: range),
+              let versionRange = Range(match.range(at: 1), in: content) else { return nil }
+        return String(content[versionRange])
+    }
+
+    private static func scanAndroidOldNDK() -> CleanupCategory? {
+        let ndkPath = "\(home)/Library/Android/sdk/ndk"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: ndkPath), entries.count > 1 else { return nil }
+        guard let current = flutterDefaultNdkVersion() else { return nil }
+
+        var targets: [String] = []
+        var total: Int64 = 0
+        for entry in entries where entry != current {
+            let full = "\(ndkPath)/\(entry)"
+            targets.append(full)
+            total += Shell.directorySizeBytes(full)
+        }
+        guard !targets.isEmpty else { return nil }
+        return CleanupCategory(
+            id: "android-old-ndk",
+            name: "Android 구버전 NDK (\(targets.count)개, 현재 Flutter 기본값 \(current) 제외)",
+            tier: .verified, kind: .androidOldNDK,
+            detail: "지금 설치된 Flutter SDK가 기본으로 쓰는 버전이 아닙니다. 특정 플러그인이 구버전을 요구하면 다시 필요할 수 있습니다",
+            sizeBytes: total, targetPaths: targets
+        )
+    }
+
+    // MARK: - 🟢 Claude 데스크톱 캐시 / 🔴 로컬 샌드박스 VM
+
+    private static func scanClaudeAppCache() -> CleanupCategory {
+        let base = "\(home)/Library/Application Support/Claude"
+        let cacheDirs = ["Cache", "Code Cache", "GPUCache", "DawnWebGPUCache", "DawnGraphiteCache",
+                          "Shared Dictionary", "blob_storage", "VideoDecodeStats"]
+        var targets: [String] = []
+        var total: Int64 = 0
+        for name in cacheDirs {
+            let full = "\(base)/\(name)"
+            guard FileManager.default.fileExists(atPath: full) else { continue }
+            targets.append(full)
+            total += Shell.directorySizeBytes(full)
+        }
+        return CleanupCategory(
+            id: "claude-app-cache", name: "Claude 데스크톱 캐시", tier: .safe, kind: .claudeAppCache,
+            detail: "브라우저 엔진 캐시입니다. 대화 기록(~/.claude)과는 별개 경로라 무관하며 자동 재생성됩니다",
+            sizeBytes: total, targetPaths: targets
+        )
+    }
+
+    private static func scanClaudeVMBundles() -> CleanupCategory? {
+        let path = "\(home)/Library/Application Support/Claude/vm_bundles"
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let size = Shell.directorySizeBytes(path)
+        guard size > 100_000_000 else { return nil }
+        return CleanupCategory(
+            id: "claude-vm-bundles", name: "Claude 로컬 샌드박스 VM", tier: .manual, kind: .claudeVMBundles,
+            detail: "로컬 격리 실행용 리눅스 VM 이미지입니다. 지우면 다음 샌드박스 실행 때 재다운로드됩니다",
+            sizeBytes: size, targetPaths: [path]
         )
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -6,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover!
     private var viewModel: CleanupViewModel!
     private var timer: Timer?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Dock 아이콘 없이 메뉴바에만 상주
@@ -13,6 +15,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         viewModel = CleanupViewModel()
         viewModel.refreshDiskStatus()
+
+        // 팝오버 안에서 정리/재스캔으로 diskStatus가 바뀔 때마다 메뉴바 타이틀도 즉시 따라가게 함
+        // (기존엔 60초 타이머·팝오버 토글 시에만 갱신되어 정리 직후 메뉴바가 옛 값으로 남는 문제가 있었음).
+        viewModel.$diskStatus
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateStatusItemTitle() }
+            .store(in: &cancellables)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {

@@ -27,6 +27,18 @@ enum CleanupKind: Equatable {
     case npxCache
     /// 자동 성격 판단이 안 되는 항목 — 삭제 버튼 없이 Finder로만 열어줌
     case downloadsReviewOnly
+    /// 연결했던 기기의 디버그 심볼 캐시. Xcode가 필요할 때 다시 받는다
+    case iosDeviceSupport
+    /// 시뮬레이터 기기의 설치된 앱·데이터만 비움(이름·페어링은 유지) — xcrun simctl erase
+    case simulatorErase
+    /// 생성된 AVD가 참조하지 않는 Android system-image
+    case androidSystemImages
+    /// 현재 Flutter SDK 기본값이 아닌 구버전 Android NDK
+    case androidOldNDK
+    /// Claude 데스크톱 앱의 브라우저 엔진 캐시(대화 기록과 무관)
+    case claudeAppCache
+    /// Claude 로컬 샌드박스 실행용 리눅스 VM 이미지. 다음 사용 시 재다운로드됨
+    case claudeVMBundles
 }
 
 struct CleanupCategory: Identifiable {
